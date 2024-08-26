@@ -10,6 +10,7 @@ import logging
 import os
 import wandb
 import sentencepiece as spm
+import tempfile 
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -68,35 +69,62 @@ def load_data(file_path, text_column):
     return df[text_column].tolist()
 
 def train_sentencepiece_and_merge_vocab(texts, existing_tokenizer, vocab_size=32000, model_prefix='sp_model'):
-    # Train SentencePiece model
-    spm.SentencePieceTrainer.train(input=texts, model_prefix=model_prefix, vocab_size=vocab_size, model_type='bpe')
-    
-    # Load the trained SentencePiece model
-    sp = spm.SentencePieceProcessor()
-    sp.load(f'{model_prefix}.model')
-    
-    # Get the SentencePiece vocabulary
-    sp_vocab = {sp.id_to_piece(i): i for i in range(sp.get_piece_size())}
-    
-    # Merge vocabularies
-    merged_vocab = dict(existing_tokenizer.vocab)
-    new_tokens = [token for token in sp_vocab if token not in merged_vocab]
-    
-    # Add new tokens to the merged vocabulary
-    for token in new_tokens:
-        merged_vocab[token] = len(merged_vocab)
-    
-    return merged_vocab
+    # Create a temporary file to store the texts
+    with tempfile.NamedTemporaryFile(mode='w', delete=False, encoding='utf-8') as temp_file:
+        for text in texts:
+            temp_file.write(text + '\n')
+        temp_file_name = temp_file.name
+
+    try:
+        # Train SentencePiece model
+        spm.SentencePieceTrainer.train(input=temp_file_name, model_prefix=model_prefix, vocab_size=vocab_size, model_type='bpe')
+        
+        # Load the trained SentencePiece model
+        sp = spm.SentencePieceProcessor()
+        sp.load(f'{model_prefix}.model')
+        
+        # Get the SentencePiece vocabulary
+        sp_vocab = {sp.id_to_piece(i): i for i in range(sp.get_piece_size())}
+        
+        # Merge vocabularies
+        merged_vocab = dict(existing_tokenizer.vocab)
+        new_tokens = [token for token in sp_vocab if token not in merged_vocab]
+        
+        # Add new tokens to the merged vocabulary
+        for token in new_tokens:
+            merged_vocab[token] = len(merged_vocab)
+        
+        return merged_vocab
+    finally:
+        # Clean up temporary file
+        os.unlink(temp_file_name)
+        # Clean up SentencePiece model files
+        for ext in ['.model', '.vocab']:
+            try:
+                os.remove(f'{model_prefix}{ext}')
+            except FileNotFoundError:
+                pass
 
 def create_merged_tokenizer(existing_tokenizer, merged_vocab):
+    # Create a vocabulary file
+    vocab_file = "merged_vocab.txt"
+    with open(vocab_file, "w", encoding="utf-8") as f:
+        for token, index in sorted(merged_vocab.items(), key=lambda x: x[1]):
+            f.write(f"{token}\n")
+    
     # Create a new tokenizer with the merged vocabulary
     merged_tokenizer = BertTokenizerFast(
-        vocab_file=None,
+        vocab_file=vocab_file,
         do_lower_case=existing_tokenizer.do_lower_case,
-        do_basic_tokenize=existing_tokenizer.do_basic_tokenize,
+        unk_token=existing_tokenizer.unk_token,
+        sep_token=existing_tokenizer.sep_token,
+        pad_token=existing_tokenizer.pad_token,
+        cls_token=existing_tokenizer.cls_token,
+        mask_token=existing_tokenizer.mask_token,
     )
-    merged_tokenizer.vocab = merged_vocab
-    merged_tokenizer.ids_to_tokens = {v: k for k, v in merged_vocab.items()}
+    
+    # Clean up the temporary vocab file
+    os.remove(vocab_file)
     
     return merged_tokenizer
 
@@ -264,13 +292,13 @@ if __name__ == "__main__":
     parser.add_argument("--data_file", type=str, default="/opt/data/commonfilesharePHI/jnchiang/projects/er-pseudonotes/mimic/mimic-iv-ed-2.2/mimic-iv-ed-2.2/text_repr.json", help="Path to the JSON file containing the training data")
     parser.add_argument("--text_column", type=str, required=True, help="Name of the column in the JSON file containing the text data")
     parser.add_argument("--output_dir", type=str, default="./output", help="Directory to save the trained models")
-    parser.add_argument("--num_epochs", type=int, default=10, help="Number of training epochs")
-    parser.add_argument("--batch_size", type=int, default=8, help="Batch size for training")
+    parser.add_argument("--num_epochs", type=int, default=100, help="Number of training epochs")
+    parser.add_argument("--batch_size", type=int, default=64, help="Batch size for training")
     parser.add_argument("--learning_rate", type=float, default=2e-5, help="Learning rate")
     parser.add_argument("--max_length", type=int, default=512, help="Maximum sequence length")
     parser.add_argument("--val_split", type=float, default=0.1, help="Validation set split ratio")
-    parser.add_argument("--early_stopping_patience", type=int, default=3, help="Number of validation rounds with no improvement after which training will be stopped")
-    parser.add_argument("--validation_steps", type=int, default=10000, help="Number of steps between validation rounds")
+    parser.add_argument("--early_stopping_patience", type=int, default=5, help="Number of validation rounds with no improvement after which training will be stopped")
+    parser.add_argument("--validation_steps", type=int, default=100000, help="Number of steps between validation rounds")
     parser.add_argument("--additional_vocab_size", type=int, default=10000, help="Number of additional vocabulary items to add using SentencePiece")
 
     args = parser.parse_args()
