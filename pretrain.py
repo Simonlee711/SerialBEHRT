@@ -1,6 +1,6 @@
 import torch
 from torch.utils.data import Dataset, DataLoader
-from transformers import AutoTokenizer, AutoModelForMaskedLM, AdamW, get_linear_schedule_with_warmup
+from transformers import AutoTokenizer, AutoModelForMaskedLM, AdamW, get_linear_schedule_with_warmup, BertTokenizerFast
 from sklearn.model_selection import train_test_split
 import pandas as pd
 import json
@@ -9,6 +9,7 @@ import argparse
 import logging
 import os
 import wandb
+import sentencepiece as spm
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -66,6 +67,39 @@ def load_data(file_path, text_column):
     logger.info(f"Data loaded. Shape: {df.shape}")
     return df[text_column].tolist()
 
+def train_sentencepiece_and_merge_vocab(texts, existing_tokenizer, vocab_size=32000, model_prefix='sp_model'):
+    # Train SentencePiece model
+    spm.SentencePieceTrainer.train(input=texts, model_prefix=model_prefix, vocab_size=vocab_size, model_type='bpe')
+    
+    # Load the trained SentencePiece model
+    sp = spm.SentencePieceProcessor()
+    sp.load(f'{model_prefix}.model')
+    
+    # Get the SentencePiece vocabulary
+    sp_vocab = {sp.id_to_piece(i): i for i in range(sp.get_piece_size())}
+    
+    # Merge vocabularies
+    merged_vocab = dict(existing_tokenizer.vocab)
+    new_tokens = [token for token in sp_vocab if token not in merged_vocab]
+    
+    # Add new tokens to the merged vocabulary
+    for token in new_tokens:
+        merged_vocab[token] = len(merged_vocab)
+    
+    return merged_vocab
+
+def create_merged_tokenizer(existing_tokenizer, merged_vocab):
+    # Create a new tokenizer with the merged vocabulary
+    merged_tokenizer = BertTokenizerFast(
+        vocab_file=None,
+        do_lower_case=existing_tokenizer.do_lower_case,
+        do_basic_tokenize=existing_tokenizer.do_basic_tokenize,
+    )
+    merged_tokenizer.vocab = merged_vocab
+    merged_tokenizer.ids_to_tokens = {v: k for k, v in merged_vocab.items()}
+    
+    return merged_tokenizer
+
 def train(args):
     # Initialize wandb
     wandb.init(project="PseudonotesBERT", config=vars(args))
@@ -77,12 +111,21 @@ def train(args):
     # Load your data
     texts = load_data(args.data_file, args.text_column)
 
+    # Train SentencePiece and merge vocabulary
+    merged_vocab = train_sentencepiece_and_merge_vocab(texts, tokenizer, vocab_size=args.additional_vocab_size)
+    
+    # Create a new tokenizer with the merged vocabulary
+    merged_tokenizer = create_merged_tokenizer(tokenizer, merged_vocab)
+    
+    # Resize the token embeddings of the model
+    model.resize_token_embeddings(len(merged_tokenizer))
+
     # Split the data into train and validation sets
     train_texts, val_texts = train_test_split(texts, test_size=args.val_split, random_state=42)
 
     # Create datasets and dataloaders
-    train_dataset = TextDataset(train_texts, tokenizer, max_length=args.max_length)
-    val_dataset = TextDataset(val_texts, tokenizer, max_length=args.max_length)
+    train_dataset = TextDataset(train_texts, merged_tokenizer, max_length=args.max_length)
+    val_dataset = TextDataset(val_texts, merged_tokenizer, max_length=args.max_length)
 
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False)
@@ -184,6 +227,14 @@ def train(args):
                     artifact.add_file(model_save_path)
                     wandb.log_artifact(artifact)
                     
+                    # Save the merged tokenizer
+                    merged_tokenizer.save_pretrained(os.path.join(args.output_dir, f'best_tokenizer_step_{global_step}'))
+                    
+                    # Log best tokenizer as artifact
+                    tokenizer_artifact = wandb.Artifact(f"best_tokenizer_step_{global_step}", type="tokenizer")
+                    tokenizer_artifact.add_dir(os.path.join(args.output_dir, f'best_tokenizer_step_{global_step}'))
+                    wandb.log_artifact(tokenizer_artifact)
+                    
                     early_stopping_counter = 0
                 else:
                     early_stopping_counter += 1
@@ -211,6 +262,7 @@ if __name__ == "__main__":
     parser.add_argument("--val_split", type=float, default=0.1, help="Validation set split ratio")
     parser.add_argument("--early_stopping_patience", type=int, default=3, help="Number of validation rounds with no improvement after which training will be stopped")
     parser.add_argument("--validation_steps", type=int, default=10000, help="Number of steps between validation rounds")
+    parser.add_argument("--additional_vocab_size", type=int, default=10000, help="Number of additional vocabulary items to add using SentencePiece")
 
     args = parser.parse_args()
 
