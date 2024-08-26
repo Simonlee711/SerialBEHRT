@@ -100,6 +100,15 @@ def create_merged_tokenizer(existing_tokenizer, merged_vocab):
     
     return merged_tokenizer
 
+def export_vocab(vocab, file_path):
+    """
+    Export the vocabulary to a file.
+    """
+    with open(file_path, 'w', encoding='utf-8') as f:
+        for token, index in sorted(vocab.items(), key=lambda x: x[1]):
+            f.write(f"{token}\t{index}\n")
+    logger.info(f"Vocabulary exported to {file_path}")
+
 def train(args):
     # Initialize wandb
     wandb.init(project="PseudonotesBERT", config=vars(args))
