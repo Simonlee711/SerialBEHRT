@@ -55,30 +55,27 @@ def compute_ranks(scores):
 metrics = ['F1', 'ROC-AUC', 'PRC-AUC']
 models = ['Tabular', 'EHR-shot', 'Word2Vec', 'DistilBERT', 'SerialBEHRT']
 
-rank_sums = defaultdict(lambda: defaultdict(float))
-rank_counts = defaultdict(lambda: defaultdict(int))
+# Recalculate ranks for each metric separately and then compute the average rank for each model
 
-for antibiotic in data:
-    for metric in metrics:
-        ranks = compute_ranks(data[antibiotic][metric])
-        for model in models:
-            rank_sums[metric][model] += ranks[model]
-            rank_counts[metric][model] += 1
+# Initialize dictionaries to store ranks
+ranks_per_metric = defaultdict(lambda: defaultdict(list))
+average_ranks_per_model = defaultdict(list)
 
-average_ranks = {}
-for metric in metrics:
-    average_ranks[metric] = {model: rank_sums[metric][model] / rank_counts[metric][model] for model in models}
+# Calculate ranks per metric
+for antibiotic, metrics_scores in data.items():
+    for metric, model_scores in metrics_scores.items():
+        ranks = compute_ranks(model_scores)
+        for model, rank in ranks.items():
+            ranks_per_metric[metric][model].append(rank)
 
-print("Average Ranks:")
-for metric in metrics:
-    print(f"\n{metric}:")
-    sorted_ranks = sorted(average_ranks[metric].items(), key=lambda x: x[1])
-    for model, rank in sorted_ranks:
-        print(f"  {model}: {rank:.2f}")
+# Compute average ranks per metric for each model
+average_ranks_metrics = defaultdict(dict)
+for metric, model_ranks in ranks_per_metric.items():
+    for model, ranks in model_ranks.items():
+        average_ranks_metrics[metric][model] = np.mean(ranks)
 
-overall_average_ranks = {model: np.mean([average_ranks[metric][model] for metric in metrics]) for model in models}
+# Compute the overall average rank for each model using the average ranks from each metric
+overall_average_ranks = {model: np.mean([average_ranks_metrics[metric][model] for metric in metrics])
+                         for model in models}
 
-print("\nOverall Average Ranks:")
-sorted_overall_ranks = sorted(overall_average_ranks.items(), key=lambda x: x[1])
-for model, rank in sorted_overall_ranks:
-    print(f"  {model}: {rank:.2f}")
+average_ranks_metrics, overall_average_ranks
